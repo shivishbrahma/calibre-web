@@ -25,8 +25,7 @@ import chardet  # dependency of requests
 import copy
 from importlib.metadata import metadata
 
-from flask import Blueprint, jsonify
-from flask import request, redirect, send_from_directory, make_response, flash, abort, url_for, Response
+from flask import Blueprint, jsonify, request, redirect, send_from_directory, make_response, flash, abort, url_for
 from flask import session as flask_session
 from flask_babel import gettext as _
 from flask_babel import get_locale
@@ -1198,13 +1197,14 @@ def serve_book(book_id, book_format, anyname):
     if not data:
         return "File not in Database"
     range_header = request.headers.get('Range', None)
-
+    if not range_header:
+        log.info('Serving book: \'%s\' to %s - %s', data.name, current_user.name,
+                 request.headers.get('X-Forwarded-For', request.remote_addr))
     if config.config_use_google_drive:
         try:
             headers = Headers()
             headers["Content-Type"] = mimetypes.types_map.get('.' + book_format, "application/octet-stream")
-            if not range_header:
-                log.info('Serving book: %s', data.name)
+            if not range_header:                
                 headers['Accept-Ranges'] = 'bytes'
             df = getFileFromEbooksFolder(book.path, data.name + "." + book_format)
             return do_gdrive_download(df, headers, (book_format.upper() == 'TXT'))
@@ -1213,7 +1213,6 @@ def serve_book(book_id, book_format, anyname):
             return "File Not Found"
     else:
         if book_format.upper() == 'TXT':
-            log.info('Serving book: %s', data.name)
             try:
                 rawdata = open(os.path.join(config.get_book_path(), book.path, data.name + "." + book_format),
                                "rb").read()
@@ -1234,7 +1233,6 @@ def serve_book(book_id, book_format, anyname):
         response = make_response(
             send_from_directory(os.path.join(config.get_book_path(), book.path), data.name + "." + book_format))
         if not range_header:
-            log.info('Serving book: %s', data.name)
             response.headers['Accept-Ranges'] = 'bytes'
         return response
 
@@ -1253,8 +1251,7 @@ def download_link(book_id, book_format, anyname):
 @download_required
 def send_to_ereader(book_id, book_format, convert):
     if not config.get_mail_server_configured():
-        response = [{'type': "danger", 'message': _("Please configure the SMTP mail settings first...")}]
-        return Response(json.dumps(response), mimetype='application/json')
+        return make_response(jsonify(type="danger", message=_("Please configure the SMTP mail settings first...")))
     elif current_user.kindle_mail:
         result = send_mail(book_id, book_format, convert, current_user.kindle_mail, config.get_book_path(),
                            current_user.name)
@@ -1266,7 +1263,7 @@ def send_to_ereader(book_id, book_format, convert):
             response = [{'type': "danger", 'message': _("Oops! There was an error sending book: %(res)s", res=result)}]
     else:
         response = [{'type': "danger", 'message': _("Oops! Please update your profile with a valid eReader Email.")}]
-    return Response(json.dumps(response), mimetype='application/json')
+    return make_response(jsonify(response))
 
 
 # ################################### Login Logout ##################################################################
@@ -1584,9 +1581,10 @@ def read_book(book_id, book_format):
         bookmark = ub.session.query(ub.Bookmark).filter(and_(ub.Bookmark.user_id == int(current_user.id),
                                                              ub.Bookmark.book_id == book_id,
                                                              ub.Bookmark.format == book_format.upper())).first()
-    if book_format.lower() == "epub":
-        log.debug("Start epub reader for %d", book_id)
-        return render_title_template('read.html', bookid=book_id, title=book.title, bookmark=bookmark)
+    if book_format.lower() == "epub" or book_format.lower() == "kepub":
+        log.debug("Start [k]epub reader for %d", book_id)
+        return render_title_template('read.html', bookid=book_id, title=book.title, bookmark=bookmark,
+                                     book_format=book_format)
     elif book_format.lower() == "pdf":
         log.debug("Start pdf reader for %d", book_id)
         return render_title_template('readpdf.html', pdffile=book_id, title=book.title)
@@ -1646,6 +1644,11 @@ def show_book(book_id):
 
         entry.email_share_list = check_send_to_ereader(entry)
         entry.reader_list = check_read_formats(entry)
+
+        entry.reader_list_sizes = dict()
+        for data in entry.data:
+            if data.format.lower() in entry.reader_list:
+                entry.reader_list_sizes[data.format.lower()] = data.uncompressed_size
 
         entry.audio_entries = []
         for media_format in entry.data:
